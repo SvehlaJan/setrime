@@ -11,15 +11,18 @@
 - **Currencies:** CZK (primary), PLN, EUR - sheet auto-converts to CZK via formula
 - **Categories:** Data validation dropdown in the Google Sheet, **in Slovak language**
 - **Sheet structure:** `Date | Category | Description | Amount PLN | Amount CZK | Amount EUR | Total CZK`
-- **Sheet organization:** Monthly tabs (e.g., "January 2026", "February 2026")
+- **Sheet organization:** Monthly tabs in `MM/YYYY` format (e.g., "02/2026", "03/2026")
 - **Total CZK column:** Formula (auto-calculated) - bot must never write to it
 - **Users:** Two users - you and your wife (both whitelisted by Telegram user ID)
 - **Operations:** Add expenses only (no edit/delete)
 - **Utility commands:** `/summary`, `/last`, `/undo`, `/categories` - all requested
 - **Bot interface:** English
+- **Interactivity:** If category is ambiguous, bot sends a Telegram single-choice poll for the user to pick
+- **Code quality:** Statically typed Python (type hints everywhere, `mypy --strict`, Pydantic models)
 - **Error handling:** Full error messages sent to user + comprehensive server-side logging
 - **Hosting:** Self-hosted on a Proxmox mini-PC (no dedicated GPU)
 - **LLM:** Cloud API required (no GPU for local inference)
+- **Secrets:** Docker `.env` file + mounted `credentials.json` (see section 5.2)
 
 **Core Flow:**
 ```
@@ -42,7 +45,7 @@ User (you or wife) sends message (image or text)
        No                       |
         |                  User replies
         v <─────────────────────┘
-  Find correct monthly tab (e.g. "February 2026")
+  Find correct monthly tab (e.g. "02/2026")
   Write row to correct currency column
   Leave Total CZK for the formula
         |
@@ -220,7 +223,7 @@ This is the most critical choice. We need a model that can:
 │  │  ┌─────────────────────────────────────────────┐  │ │
 │  │  │   Conversation Manager                      │  │ │
 │  │  │                                             │  │ │
-│  │  │   category=null → inline keyboard           │  │ │
+│  │  │   category=null → Telegram poll             │  │ │
 │  │  │   amount=null   → "What was the amount?"    │  │ │
 │  │  │   all fields ok → confirm + write           │  │ │
 │  │  └──────────────────┬──────────────────────────┘  │ │
@@ -229,7 +232,7 @@ This is the most critical choice. We need a model that can:
 │  │  ┌─────────────────────────────────────────────┐  │ │
 │  │  │   Google Sheets Writer (gspread)            │  │ │
 │  │  │                                             │  │ │
-│  │  │   Appends row to correct month/sheet:       │  │ │
+│  │  │   Appends row to correct monthly tab:        │  │ │
 │  │  │   Date | Category | Description |           │  │ │
 │  │  │   Amt PLN | Amt CZK | Amt EUR | (Total)    │  │ │
 │  │  │                                             │  │ │
@@ -266,10 +269,11 @@ The Google Sheet already exists with this exact structure. The bot must write to
 | **Amount EUR** | Number | Conditionally | Only filled if currency is EUR |
 | **Total CZK** | Formula | **Never** | Auto-converts PLN/EUR to CZK. Bot must never touch this column. |
 
-**Sheet organization: Monthly tabs**
-- Each month has its own tab/worksheet (e.g., "January 2026", "February 2026")
+**Sheet organization: Monthly tabs (`MM/YYYY` format)**
+- Each month has its own tab/worksheet named in `MM/YYYY` format (e.g., "02/2026", "03/2026", "12/2025")
 - The bot must determine the correct tab based on the expense date (not necessarily today's date - a user might log a past expense)
-- If the tab doesn't exist yet (e.g., logging the first expense of a new month), the bot should handle this gracefully (error message or create the tab)
+- Tab name is derived as: `expense_date.strftime("%m/%Y")` → e.g., `"02/2026"`
+- If the tab doesn't exist yet (e.g., logging the first expense of a new month), the bot should handle this gracefully (error message asking the user to create the tab, or optionally auto-create it)
 
 **Important implementation details:**
 - The bot must write the amount into exactly **one** of the three currency columns and leave the other two empty/blank
@@ -293,7 +297,7 @@ Categories are defined as a **data validation dropdown** in the Google Sheet, wr
 **Bot behavior:**
 1. **On startup:** Read the list of valid categories from the sheet (data validation range or unique existing values), cache them in memory
 2. **During parsing:** The LLM receives the full Slovak category list in its prompt so it can match "obed v reštaurácii" → "Stravovanie"
-3. **If LLM is uncertain:** Present an inline keyboard with all categories so the user can tap to select
+3. **If LLM is uncertain:** Send a **Telegram single-choice poll** with all categories for the user to pick (see section 3.6)
 4. **Cache refresh:** On `/categories` command or periodically (every hour). The `/categories` command also serves as a way to display the current list
 5. **Language bridge:** The LLM must understand that user text input is in Slovak, categories are in Slovak, but the bot interface (confirmations, error messages) is in English
 
@@ -360,11 +364,74 @@ Do NOT include any text outside the JSON object.
 | [screenshot from banking app] | `{date: "2026-02-05", amount: 890, currency: "CZK", category: "Oblečenie", description: "H&M"}` |
 
 **Follow-up question flow:**
-- If `category` is null → show inline keyboard with all Slovak categories
+- If `category` is null → send a **Telegram single-choice poll** with all Slovak categories (see section 3.6)
 - If `amount` is null → ask "What was the amount?"
-- If `currency` is null → ask "What currency?" with CZK/PLN/EUR buttons
+- If `currency` is null → ask "What currency?" with CZK/PLN/EUR inline keyboard buttons
 - If `description` is null → ask "What was this expense for?"
 - If all fields present → show confirmation summary, then write to sheet
+
+### 3.6 Interactive Category Selection (Telegram Poll)
+
+When the LLM cannot confidently determine the category, the bot sends a **Telegram single-choice poll** so the user can tap to pick.
+
+**Telegram Poll API: `sendPoll`**
+- `question`: e.g., "What category is this expense? (Albert, 450 CZK)"
+- `options`: list of Slovak category names
+- `is_anonymous`: `false` (so the bot can see who voted)
+- `allows_multiple_answers`: `false` (single-choice)
+- `type`: `"regular"` (not quiz)
+
+**Telegram Poll limitations and workarounds:**
+
+| Constraint | Limit | Workaround |
+|-----------|-------|------------|
+| Max options per poll | **10** | If more than 10 categories, split into "pages" or use inline keyboard as fallback |
+| Option text length | 100 chars | Slovak category names should be well under this |
+| Question text length | 300 chars | Include partial expense info in the question for context |
+| Poll lifetime | Stays until manually closed | Bot should listen for the answer and auto-close / ignore subsequent votes |
+
+**Implementation approach:**
+
+```
+LLM returns category=null
+        │
+        v
+  How many categories?
+        │
+   ┌────┴────┐
+  ≤10       >10
+   │         │
+   v         v
+ Single    Paginated polls OR
+ poll      inline keyboard fallback
+   │
+   v
+ User taps an option
+   │
+   v
+ Bot receives PollAnswer update
+ (via poll_answer handler)
+   │
+   v
+ Map selected option back to category name
+ Continue with expense writing
+```
+
+**Why a poll instead of inline keyboard buttons?**
+- Polls are more visually prominent and native-feeling on mobile
+- Single tap to answer (no need to scroll through a long button list)
+- The user explicitly requested this interaction pattern
+
+**Fallback for >10 categories:**
+If there are more than 10 categories, the bot has two options:
+1. **LLM pre-filtering:** Ask the LLM to return its top 5-8 best guesses instead of null, then poll with just those + an "Other" option. If user picks "Other", send a second poll with the remaining categories. (Recommended)
+2. **Inline keyboard:** Fall back to an inline keyboard with all categories arranged in a 2-column grid. No option limit.
+
+**Poll answer handling (python-telegram-bot):**
+- Register a `PollAnswerHandler` to receive poll responses
+- The bot must maintain a mapping: `poll_id → pending_expense` so when the answer comes in, it knows which expense to complete
+- This mapping should be in-memory (dict) since the bot only serves 2 users; no need for a database
+- Clean up old mappings after a timeout (e.g., 1 hour) to avoid memory leaks
 
 ---
 
@@ -392,17 +459,132 @@ Building custom is the right call for this use case.
 
 ---
 
-## 5. Security Considerations
+## 5. Security & Secret Management
+
+### 5.1 General Security
 
 1. **Restrict bot access** - Whitelist exactly two Telegram user IDs (you and your wife) via `ALLOWED_USER_IDS` env var. Reject all other users with a polite "unauthorized" message.
-2. **Store credentials securely** - Service account JSON, API keys, Telegram token in environment variables (Docker `.env` file), never in code
-3. **No financial data stored on server** - Parse and forward to Google Sheets, don't keep a local database of expenses
-4. **Image handling** - Process in memory, don't persist banking screenshots to disk
-5. **Google Sheet permissions** - Service account should only have access to the specific spreadsheet
+2. **No financial data stored on server** - Parse and forward to Google Sheets, don't keep a local database of expenses.
+3. **Image handling** - Process in memory, don't persist banking screenshots to disk.
+4. **Google Sheet permissions** - Service account should only have access to the specific spreadsheet.
 
----
+### 5.2 Secret Management
 
-## 5.1 Error Handling & Logging Strategy
+There are **4 secrets** this application needs:
+
+| Secret | What It Is | Format |
+|--------|-----------|--------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | String: `110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw` |
+| `GEMINI_API_KEY` | API key from Google AI Studio | String: `AIzaSy...` |
+| `GOOGLE_SHEET_ID` | Spreadsheet ID from the Google Sheets URL | String: `1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms` |
+| `GOOGLE_CREDENTIALS` | Google service account credentials | JSON (entire file content or file path) |
+
+Plus **2 non-secret config values:**
+
+| Config | What It Is | Format |
+|--------|-----------|--------|
+| `ALLOWED_USER_IDS` | Telegram user IDs for you and your wife | Comma-separated: `123456789,987654321` |
+| `DEFAULT_CURRENCY` | Fallback currency | String: `CZK` |
+
+#### Recommended Approach: Docker `.env` file + mounted credentials file
+
+This is the simplest approach for a self-hosted Docker setup on your Proxmox server.
+
+**How it works:**
+
+```
+expense-bot/
+├── .env                  # ← All secrets here (gitignored)
+├── credentials.json      # ← Google service account key (gitignored)
+├── docker-compose.yml    # ← References .env and mounts credentials.json
+└── ...
+```
+
+**Step 1:** Create the `.env` file on the server (never commit this):
+
+```bash
+# .env (on the server only, never in git)
+TELEGRAM_BOT_TOKEN=110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw
+GEMINI_API_KEY=AIzaSyA1B2C3D4E5F6G7H8I9J0
+GOOGLE_SHEET_ID=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms
+GOOGLE_CREDENTIALS_FILE=/app/credentials.json
+ALLOWED_USER_IDS=123456789,987654321
+DEFAULT_CURRENCY=CZK
+LOG_LEVEL=INFO
+```
+
+**Step 2:** Place the `credentials.json` (Google service account key) alongside `.env` on the server.
+
+**Step 3:** Docker Compose mounts both:
+
+```yaml
+services:
+  expense-bot:
+    build: .
+    container_name: expense-bot
+    restart: unless-stopped
+    env_file: .env                                     # ← injects all env vars
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro    # ← mounts creds as read-only
+```
+
+**Step 4:** The Python app reads them:
+
+```python
+import os
+from google.oauth2.service_account import Credentials
+
+# Simple env var reads (validated by AppConfig dataclass)
+bot_token: str = os.environ["TELEGRAM_BOT_TOKEN"]
+gemini_key: str = os.environ["GEMINI_API_KEY"]
+
+# Google credentials from mounted file
+creds = Credentials.from_service_account_file(
+    os.environ["GOOGLE_CREDENTIALS_FILE"],
+    scopes=["https://www.googleapis.com/auth/spreadsheets"],
+)
+```
+
+#### Alternative: Embed credentials JSON as env var (no file mount)
+
+If you prefer not to deal with file mounts, the Google credentials JSON can be base64-encoded into an env var:
+
+```bash
+# .env
+GOOGLE_CREDENTIALS_BASE64=eyJ0eXBlIjoic2VydmljZV9hY2NvdW50Iiw...  # base64 of credentials.json
+```
+
+```python
+import base64, json, os
+from google.oauth2.service_account import Credentials
+
+creds_json = json.loads(base64.b64decode(os.environ["GOOGLE_CREDENTIALS_BASE64"]))
+creds = Credentials.from_service_account_info(creds_json, scopes=[...])
+```
+
+**Pros:** No file mount needed, purely env-var driven, easier to move between hosts.
+**Cons:** Slightly more complex setup (base64 encoding step), harder to inspect/debug.
+
+#### What gets committed to Git vs what stays on the server
+
+| File | In Git? | Notes |
+|------|---------|-------|
+| `.env.example` | Yes | Template with placeholder values, no real secrets |
+| `.env` | **No** (`.gitignore`) | Real secrets, only on the server |
+| `credentials.json` | **No** (`.gitignore`) | Service account key, only on the server |
+| `docker-compose.yml` | Yes | References `.env` and `credentials.json` but contains no secrets |
+
+#### How to initially get secrets onto the server
+
+1. **SSH into the Proxmox LXC/VM** where the bot will run
+2. **Clone the repo:** `git clone <repo-url> && cd expense-bot`
+3. **Create `.env`:** `cp .env.example .env && nano .env` → fill in real values
+4. **Copy credentials.json:** `scp` from your local machine, or paste via the Proxmox console
+5. **Start:** `docker compose up -d`
+
+That's it. No external secret manager needed for a self-hosted personal project with 2 users.
+
+### 5.3 Error Handling & Logging Strategy
 
 **Requirement:** Full error messages sent to the user in Telegram + comprehensive server-side logging.
 
@@ -420,7 +602,7 @@ Details: Gemini API returned 429 (rate limit exceeded)
 Suggestion: Please try again in a minute.
 
 ❌ Error: Failed to write to Google Sheet.
-Details: Worksheet "February 2026" not found.
+Details: Worksheet "02/2026" not found.
 Suggestion: Please create the tab in the spreadsheet, or send the expense again.
 
 ❌ Error: Could not determine expense amount.
@@ -442,7 +624,7 @@ Use Python's `logging` module with structured output:
 
 **Log format:**
 ```
-2026-02-08 14:23:45 [INFO] Expense added: user=@jansvehla date=2026-02-08 amount=450.00 currency=CZK category=Potraviny description="Albert" sheet="February 2026"
+2026-02-08 14:23:45 [INFO] Expense added: user=@jansvehla date=2026-02-08 amount=450.00 currency=CZK category=Potraviny description="Albert" sheet="02/2026"
 2026-02-08 14:25:12 [ERROR] Gemini API error: 500 Internal Server Error. User=@wife. Input="obed 185kc". Traceback: ...
 ```
 
@@ -499,7 +681,7 @@ Use Python's `logging` module with structured output:
 2. User whitelist middleware (rejects unauthorized users)
 3. Google Sheets connection via `gspread` + service account
 4. Read categories from data validation dropdown (Slovak) and cache in memory
-5. Locate correct monthly tab by name (e.g., "February 2026")
+5. Locate correct monthly tab by name (e.g., "02/2026")
 
 ### Phase 2 details (core feature):
 1. Receive Slovak text → send to Gemini with system prompt containing cached Slovak categories
@@ -509,7 +691,7 @@ Use Python's `logging` module with structured output:
 5. Send confirmation message to user
 
 ### Phase 5 details (utility commands):
-- `/summary` or `/summary February 2026` → read all rows from a monthly tab, aggregate by category, format as a table
+- `/summary` or `/summary 02/2026` → read all rows from a monthly tab, aggregate by category, format as a table
 - `/last` or `/last 5` → show the last N expenses added (from current month tab)
 - `/undo` → remove the last row added to the current month tab (with confirmation)
 - `/categories` → list all categories from cache, refresh from sheet
@@ -529,14 +711,18 @@ All questions have been answered. Here is the complete requirements summary:
 | 4 | Currency | Primary: CZK. Also PLN and EUR. Sheet auto-converts to CZK via formula. |
 | 5 | Google Sheet structure | `Date | Category | Description | Amount PLN | Amount CZK | Amount EUR | Total CZK` |
 | 6 | Total CZK column | **Formula** (auto-calculated). Bot never writes to it. |
-| 7 | Sheet organization | **Monthly tabs** (e.g., "January 2026", "February 2026") |
+| 7 | Sheet organization | **Monthly tabs** in `MM/YYYY` format (e.g., "02/2026") |
 | 8 | Users | **Two users**: you and your wife. Both whitelisted by Telegram user ID. |
 | 9 | Operations | **Add only**. No edit/delete via bot. |
 | 10 | Utility commands | **Yes, all**: `/summary`, `/last`, `/undo`, `/categories` |
 | 11 | Bot interface language | **English** |
 | 12 | Error handling | **Full error messages** sent to user in Telegram + comprehensive server-side logging |
-| 13 | Server specs | Proxmox mini-PC, no dedicated GPU. Multiple apps already hosted. |
-| 14 | Hosting preference | Self-hosted on the mini-PC, Docker in LXC container. |
+| 13 | Code quality | **Statically typed** Python: type hints, `mypy --strict`, Pydantic v2 models |
+| 14 | Category interaction | **Telegram single-choice poll** when category is ambiguous |
+| 15 | Tab naming | **`MM/YYYY`** format (e.g., "02/2026") |
+| 16 | Secret management | Docker `.env` file + mounted `credentials.json` (see section 5.2) |
+| 17 | Server specs | Proxmox mini-PC, no dedicated GPU. Multiple apps already hosted. |
+| 18 | Hosting preference | Self-hosted on the mini-PC, Docker in LXC container. |
 
 ### Pre-Implementation Setup Checklist
 
@@ -549,46 +735,163 @@ Before coding can begin, these manual steps are needed:
 - [ ] **Share Google Sheet** with the service account email (Editor permission)
 - [ ] **Get Gemini API key** from Google AI Studio (free)
 - [ ] **Note the Google Sheet ID** (from the URL: `docs.google.com/spreadsheets/d/{SHEET_ID}/...`)
-- [ ] **Confirm tab naming convention** (exact format: "January 2026"? "Jan 2026"? "01/2026"? "2026-01"?)
+- [x] **Tab naming convention** confirmed: `MM/YYYY` format (e.g., "02/2026")
 
 ---
 
-## 9. Final Recommended Stack
+## 9. Code Quality: Static Typing
+
+**Requirement:** All Python code must be statically typed.
+
+### Approach
+
+- **Type hints on all functions:** parameters and return types annotated
+- **`mypy --strict`** used for static analysis during development (or at minimum `mypy --disallow-untyped-defs`)
+- **Pydantic v2** for runtime-validated data models (parsed expense, config) - this also provides JSON schema generation for LLM structured output
+- **`dataclasses`** for simple internal data structures where Pydantic is overkill
+- **`TypeAlias`** and `Literal` types for constrained values (e.g., `Currency = Literal["CZK", "PLN", "EUR"]`)
+
+### Data Models (Typed)
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# Constrained types
+Currency = Literal["CZK", "PLN", "EUR"]
+
+
+class ParsedExpense(BaseModel):
+    """Structured output from the LLM parser. Fields may be None if
+    the LLM could not determine them (triggers follow-up questions)."""
+
+    date: date | None = None
+    amount: float | None = None
+    currency: Currency | None = None
+    category: str | None = None
+    description: str | None = None
+
+
+class Expense(BaseModel):
+    """A fully validated expense ready to be written to Google Sheets.
+    All fields are required (non-None)."""
+
+    date: date
+    amount: float = Field(gt=0)
+    currency: Currency
+    category: str
+    description: str
+
+
+@dataclass
+class PendingExpense:
+    """Tracks an expense that is mid-conversation (waiting for user
+    to fill in missing fields via poll or text reply)."""
+
+    user_id: int
+    chat_id: int
+    parsed: ParsedExpense
+    poll_id: str | None = None
+    created_at: float = field(default_factory=lambda: 0.0)  # time.time()
+
+
+@dataclass
+class AppConfig:
+    """Application configuration loaded from environment variables."""
+
+    telegram_bot_token: str
+    allowed_user_ids: list[int]
+    gemini_api_key: str
+    google_sheet_id: str
+    google_credentials_path: str
+    default_currency: Currency = "CZK"
+    log_level: str = "INFO"
+```
+
+### Type Checking in CI / Development
+
+```bash
+# Run mypy (add to Makefile or pre-commit hook)
+mypy bot/ --strict --ignore-missing-imports
+
+# Or use pyproject.toml:
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+```
+
+### Additional dev dependencies
+
+```
+# dev-requirements.txt
+mypy>=1.10
+types-Pillow
+pydantic>=2.0            # Also a runtime dependency - replaces plain dataclasses for validated models
+```
+
+**Why Pydantic in addition to dataclasses?**
+- `ParsedExpense` and `Expense` benefit from Pydantic's validation (e.g., `amount > 0`, `currency` is one of 3 values)
+- Pydantic can parse the LLM's JSON response directly into a `ParsedExpense` object with validation
+- Pydantic's `.model_json_schema()` could be used to generate a JSON schema to include in the LLM prompt (improves structured output reliability)
+- `dataclass` is used for simpler internal state (`PendingExpense`, `AppConfig`) that doesn't need runtime validation
+
+---
+
+## 10. Final Recommended Stack
 
 Based on the research and your confirmed requirements:
 
 | Component | Choice | Why |
 |-----------|--------|-----|
 | **Language** | Python 3.12+ | Best ecosystem for AI + Telegram + Google APIs |
-| **Bot Framework** | python-telegram-bot v21+ | Best conversation handler support, handles follow-up question flows natively |
+| **Type System** | mypy --strict + Pydantic v2 | Static typing throughout; Pydantic for validated LLM response models |
+| **Bot Framework** | python-telegram-bot v21+ | Best conversation handler + poll support, handles follow-up question flows natively |
 | **LLM** | Gemini 2.0 Flash (primary) | Free tier covers personal use at $0/month. Good Czech/Slovak vision+text parsing. |
 | **LLM Fallback** | GPT-4o-mini | If Gemini has outages or quality issues. ~$0.50/month. |
 | **Google Sheets** | gspread + service account | Simplest, most reliable. Reads categories dynamically. |
 | **Hosting** | Proxmox mini-PC, Docker in LXC container | $0/month, long polling (no port forwarding), fits existing infra. |
 | **Deployment** | Docker Compose | Auto-restart, env var management, easy updates. |
+| **Secrets** | Docker `.env` + mounted credentials JSON | Simple, no external secret manager needed for personal project. |
 
 **Total running cost: $0/month**
 
-### Python Dependencies (Preliminary)
+### Python Dependencies
 
 ```
+# requirements.txt (runtime)
 python-telegram-bot[ext]>=21.0    # Telegram bot framework with extras (includes httpx, etc.)
 google-generativeai>=0.8.0        # Gemini API client (google.generativeai)
 gspread>=6.0                      # Google Sheets API wrapper
 google-auth>=2.0                  # Service account authentication
+pydantic>=2.0                     # Typed data models with validation (LLM response parsing)
 Pillow>=10.0                      # Image handling (resize before sending to LLM)
 python-dotenv>=1.0                # Environment variable management
 ```
 
+```
+# dev-requirements.txt (development only)
+mypy>=1.10                        # Static type checking (run with --strict)
+types-Pillow                      # Type stubs for Pillow
+```
+
 ### Environment Variables
 
+See **section 5.2** for the full secret management approach. Summary:
+
 ```bash
-# .env file
+# .env file (on server only, gitignored)
 TELEGRAM_BOT_TOKEN=...                    # From @BotFather
-ALLOWED_USER_IDS=123456789,987654321      # Your and wife's Telegram user IDs
 GEMINI_API_KEY=...                        # From Google AI Studio
-GOOGLE_SHEETS_CREDENTIALS_FILE=...        # Path to service account JSON
 GOOGLE_SHEET_ID=...                       # Spreadsheet ID from URL
+GOOGLE_CREDENTIALS_FILE=/app/credentials.json  # Mounted via Docker volume
+ALLOWED_USER_IDS=123456789,987654321      # Your and wife's Telegram user IDs
 DEFAULT_CURRENCY=CZK                      # Default currency if ambiguous
 LOG_LEVEL=INFO                            # DEBUG for development
 ```
@@ -624,7 +927,6 @@ expense-bot/
 ### Docker Compose
 
 ```yaml
-version: "3.8"
 services:
   expense-bot:
     build: .
