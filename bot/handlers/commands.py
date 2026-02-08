@@ -7,7 +7,7 @@ from datetime import date
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bot.handlers.auth import authorized
+from bot.handlers.auth import check_authorized
 from bot.models import COL_CATEGORY, COL_DATE, COL_DESCRIPTION, COL_TOTAL_CZK
 from bot.services.categories import CategoryCache
 from bot.services.sheets import SheetsService
@@ -32,7 +32,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /start command."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
         await self._reply(
             update,
@@ -46,7 +46,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /help command."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
         await self._reply(
             update,
@@ -69,7 +69,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /categories command — list and refresh categories."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
         try:
@@ -98,7 +98,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /summary [MM/YYYY] — show monthly totals by category."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
         tab_name = self._get_tab_arg(context) or date.today().strftime("%m/%Y")
@@ -142,7 +142,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /last [N] — show last N expenses from current month."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
         count = 5
@@ -193,7 +193,7 @@ class CommandHandler:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /undo — remove the last expense from the current month."""
-        if not self._check_auth(update):
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
         tab_name = date.today().strftime("%m/%Y")
@@ -235,11 +235,6 @@ class CommandHandler:
             tab_name,
             " | ".join(deleted),
         )
-
-    def _check_auth(self, update: Update) -> bool:
-        """Check if the user is authorized. Returns True if authorized."""
-        user = update.effective_user
-        return user is not None and user.id in self._allowed_user_ids
 
     @staticmethod
     def _get_tab_arg(context: ContextTypes.DEFAULT_TYPE) -> str | None:

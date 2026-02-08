@@ -10,7 +10,7 @@ from PIL import Image
 from telegram import Poll, Update
 from telegram.ext import ContextTypes
 
-from bot.handlers.auth import authorized
+from bot.handlers.auth import check_authorized
 from bot.models import Currency, Expense, ParsedExpense, PendingExpense
 from bot.services.categories import CategoryCache
 from bot.services.llm_parser import LLMParser
@@ -67,10 +67,10 @@ class ExpenseHandler:
         if not update.message or not update.message.text or not update.effective_user:
             return
 
-        user = update.effective_user
-        if user.id not in self._allowed_user_ids:
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
+        user = update.effective_user
         text = update.message.text.strip()
         if text.startswith("/"):
             return  # ignore commands
@@ -95,11 +95,11 @@ class ExpenseHandler:
         if not update.message or not update.message.photo or not update.effective_user:
             return
 
-        user = update.effective_user
-        if user.id not in self._allowed_user_ids:
+        if not await check_authorized(update, context, self._allowed_user_ids):
             return
 
         self._cleanup_expired()
+        user = update.effective_user
         chat_id = update.effective_chat.id if update.effective_chat else 0
 
         # Download the highest-resolution photo
