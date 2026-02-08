@@ -22,6 +22,41 @@ class TestAdjustFormulaRow:
         result = SheetsService._adjust_formula_row(formula, 15, 16)
         assert result == "=E16*$K$2+F16+G16*$L$2"
 
+    def test_absolute_refs_preserved_row_2_to_3(self) -> None:
+        """Regression: copying row 2→3 must NOT corrupt $K$2 and $L$2
+        (exchange rate cells).
+        """
+        formula = "=E2*$K$2+F2+G2*$L$2"
+        result = SheetsService._adjust_formula_row(formula, 2, 3)
+        assert result == "=E3*$K$2+F3+G3*$L$2"
+
+    def test_absolute_refs_preserved_row_12_to_13(self) -> None:
+        """Absolute references containing the old row number as a
+        substring must also be preserved (e.g., $K$12 when moving row 12→13).
+        """
+        formula = "=E12*$K$12+F12+G12*$L$2"
+        result = SheetsService._adjust_formula_row(formula, 12, 13)
+        assert result == "=E13*$K$12+F13+G13*$L$2"
+
+    def test_mixed_absolute_and_relative(self) -> None:
+        """Formula with $E$1 (fully absolute) and E5 (relative)."""
+        formula = "=E5*$E$1+F5"
+        result = SheetsService._adjust_formula_row(formula, 5, 6)
+        assert result == "=E6*$E$1+F6"
+
+    def test_row_number_not_extended(self) -> None:
+        """Row 2 should not match inside '20', '22', '200', etc."""
+        formula = "=E2+F20+G2"
+        result = SheetsService._adjust_formula_row(formula, 2, 3)
+        assert result == "=E3+F20+G3"
+
+    def test_dollar_row_only(self) -> None:
+        """$2 (absolute row, relative column like A$2) should be preserved."""
+        formula = "=A$2+E2"
+        result = SheetsService._adjust_formula_row(formula, 2, 3)
+        # A$2 has $ before the row number, so it should stay; E2 should change
+        assert result == "=A$2+E3"
+
 
 class TestSummaryParsing:
     """Test the summary aggregation logic with mock row data.

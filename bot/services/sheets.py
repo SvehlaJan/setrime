@@ -186,12 +186,24 @@ class SheetsService:
 
     @staticmethod
     def _adjust_formula_row(formula: str, old_row: int, new_row: int) -> str:
-        """Naively adjust row numbers in a formula.
+        """Adjust row numbers in relative cell references within a formula.
 
-        Replaces occurrences of the old row number with the new one.
-        This handles simple formulas like =E5*rate+F5+G5*rate.
+        Only replaces row numbers in relative references (e.g., E2, F2)
+        while preserving absolute references (e.g., $K$2, $L$2) that
+        typically point to fixed cells like exchange rates.
+
+        A relative reference looks like: a letter (not preceded by $)
+        followed by the row number (not followed by more digits).
+        An absolute reference has $ before the row: $K$2.
         """
-        return formula.replace(str(old_row), str(new_row))
+        import re
+
+        # Match relative cell references: one or more letters NOT preceded
+        # by $, followed by the old row number NOT followed by more digits.
+        # Examples matched: E2, F2, AB2  |  NOT matched: $K$2, $L$2, E22
+        pattern = r'(?<!\$)([A-Za-z]+)' + str(old_row) + r'(?!\d)'
+        replacement = r'\g<1>' + str(new_row)
+        return re.sub(pattern, replacement, formula)
 
     def get_last_rows(self, tab_name: str, count: int = 5) -> list[list[str]]:
         """Get the last N data rows from a monthly tab."""
