@@ -68,6 +68,52 @@ The bot expects this exact column layout in each monthly tab (e.g., `02/2026`):
 | `/last 10` | Show last 10 expenses |
 | `/undo` | Remove the last expense from the current month |
 
+## Dry-Run Mode
+
+Set `DRY_RUN=true` in your `.env` to test the bot without writing to Google Sheets. The bot will parse expenses normally and show what it *would* write, but skip the actual sheet write.
+
+```bash
+# In .env
+DRY_RUN=true
+```
+
+This is useful for:
+- Testing the bot with real Telegram messages before going live
+- Verifying LLM parsing quality
+- Running in the cloud temporarily without risking bad data
+
+## Cloud Deployment (Temporary)
+
+If your home server isn't available, you can deploy to **Railway** for free/cheap:
+
+### Railway (recommended for temporary hosting)
+
+1. Push this repo to GitHub
+2. Go to [railway.app](https://railway.app), create a new project from the repo
+3. Add environment variables in the Railway dashboard (same as `.env`):
+   - `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `GOOGLE_SHEET_ID`, `ALLOWED_USER_IDS`
+   - For `GOOGLE_CREDENTIALS_FILE`: set `GOOGLE_CREDENTIALS_BASE64` instead (see below)
+4. Deploy — Railway uses the included `railway.toml` and `Dockerfile`
+
+**Handling credentials.json in the cloud** (no file mount available):
+
+Set `GOOGLE_CREDENTIALS_BASE64` as an env var containing the base64-encoded credentials:
+
+```bash
+# On your local machine:
+base64 -w0 credentials.json
+# Copy the output and paste it as the GOOGLE_CREDENTIALS_BASE64 env var in Railway
+```
+
+The bot supports both methods: file path (`GOOGLE_CREDENTIALS_FILE`) and base64 (`GOOGLE_CREDENTIALS_BASE64`).
+
+### Migrating from cloud to home server
+
+1. Stop the Railway deployment (or delete the project)
+2. On your Proxmox server: `git clone`, create `.env`, place `credentials.json`
+3. `docker compose up -d`
+4. The Telegram bot token stays the same — it seamlessly switches
+
 ## Development
 
 ```bash
@@ -75,8 +121,11 @@ The bot expects this exact column layout in each monthly tab (e.g., `02/2026`):
 pip install -r requirements.txt
 pip install -r dev-requirements.txt
 
-# Run locally
+# Run locally (set DRY_RUN=true in .env for safe testing)
 python -m bot.main
+
+# Run tests
+python -m pytest tests/ -v
 
 # Type checking
 mypy bot/ --strict --ignore-missing-imports

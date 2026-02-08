@@ -33,12 +33,14 @@ class ExpenseHandler:
         category_cache: CategoryCache,
         allowed_user_ids: list[int],
         default_currency: Currency,
+        dry_run: bool = False,
     ) -> None:
         self._sheets = sheets
         self._llm = llm
         self._categories = category_cache
         self._allowed_user_ids = allowed_user_ids
         self._default_currency = default_currency
+        self._dry_run = dry_run
         # poll_id -> PendingExpense (for mapping poll answers back)
         self._pending_polls: dict[str, PendingExpense] = {}
         # user_id -> PendingExpense (for text-based follow-ups)
@@ -484,6 +486,36 @@ class ExpenseHandler:
             )
             return
 
+        # Dry-run mode: show what would be written, skip actual write
+        if self._dry_run:
+            row_preview = expense.sheet_row()
+            confirmation = (
+                f"🔍 *DRY RUN* — expense parsed but NOT written:\n"
+                f"  📅 Date: {expense.date.day}.{expense.date.month}.{expense.date.year}\n"
+                f"  📁 Category: {expense.category}\n"
+                f"  📝 Description: {expense.description}\n"
+                f"  💰 Amount: {expense.amount:.2f} {expense.currency}\n"
+                f"  📄 Sheet: {expense.tab_name()}\n"
+                f"  📊 Row data: `{row_preview}`"
+            )
+            await context.bot.send_message(
+                chat_id=pending.chat_id,
+                text=confirmation,
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "DRY RUN — expense parsed: user=%d date=%s amount=%.2f "
+                "currency=%s category=%s description='%s' sheet='%s'",
+                pending.user_id,
+                expense.date.isoformat(),
+                expense.amount,
+                expense.currency,
+                expense.category,
+                expense.description,
+                expense.tab_name(),
+            )
+            return
+
         # Write to Google Sheets
         try:
             row_num = self._sheets.append_expense(expense)
@@ -509,7 +541,7 @@ class ExpenseHandler:
         # Send confirmation
         confirmation = (
             f"✅ Expense recorded (row {row_num}):\n"
-            f"  📅 Date: {expense.date.strftime('%d.%m.%Y')}\n"
+            f"  📅 Date: {expense.date.day}.{expense.date.month}.{expense.date.year}\n"
             f"  📁 Category: {expense.category}\n"
             f"  📝 Description: {expense.description}\n"
             f"  💰 Amount: {expense.amount:.2f} {expense.currency}\n"

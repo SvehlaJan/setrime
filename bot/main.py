@@ -26,7 +26,10 @@ def main() -> None:
     config = AppConfig()
     setup_logging(config.log_level)
 
-    logger.info("Starting Expense Bot...")
+    if config.dry_run:
+        logger.info("Starting Expense Bot in DRY RUN mode (no writes to Google Sheets)...")
+    else:
+        logger.info("Starting Expense Bot...")
 
     # Initialize services
     sheets = SheetsService(
@@ -60,6 +63,7 @@ def main() -> None:
         category_cache=category_cache,
         allowed_user_ids=config.allowed_user_ids,
         default_currency=config.default_currency,
+        dry_run=config.dry_run,
     )
 
     # Build the Telegram application
