@@ -172,39 +172,64 @@ class ExpenseHandler:
             all_cats = self._categories.categories
             shown = set(options) - {"Iné (Other...)"}
             remaining = [c for c in all_cats if c not in shown]
-            if remaining:
-                pending.poll_id = None
-                pending.message_id = None
-                pending.poll_options = None
-                # Send a second poll with remaining categories (up to 10)
-                if len(remaining) <= MAX_POLL_OPTIONS:
-                    poll_options_2 = remaining
+
+            if not remaining:
+                # No remaining categories (list may have changed since first poll)
+                # Fall back to text input so the expense isn't silently lost
+                logger.warning(
+                    "No remaining categories after 'Other' selection "
+                    "(categories may have changed). Falling back to text input."
+                )
+                pending.category_text_fallback = True
+                self._pending_text[pending.user_id] = pending
+                cats_hint = f"\nValid: {', '.join(all_cats)}" if all_cats else ""
+                await context.bot.send_message(
+                    chat_id=pending.chat_id,
+                    text=f"Please type the category name:{cats_hint}",
+                )
+                return
+
+            pending.poll_id = None
+            pending.message_id = None
+            pending.poll_options = None
+            # Send a second poll with remaining categories (up to 10)
+            if len(remaining) <= MAX_POLL_OPTIONS:
+                poll_options_2 = remaining
+            else:
+                poll_options_2 = remaining[: MAX_POLL_OPTIONS]
+            desc = pending.parsed.description or "expense"
+            try:
+                message = await context.bot.send_poll(
+                    chat_id=pending.chat_id,
+                    question=f"Category for: {desc}? (more options)",
+                    options=poll_options_2,
+                    is_anonymous=False,
+                    allows_multiple_answers=False,
+                    type=Poll.REGULAR,
+                )
+                new_poll_id = message.poll.id if message.poll else None
+                if new_poll_id:
+                    pending.poll_id = new_poll_id
+                    pending.message_id = message.message_id
+                    pending.poll_options = poll_options_2
+                    self._pending_polls[new_poll_id] = pending
                 else:
-                    poll_options_2 = remaining[: MAX_POLL_OPTIONS]
-                desc = pending.parsed.description or "expense"
-                try:
-                    message = await context.bot.send_poll(
-                        chat_id=pending.chat_id,
-                        question=f"Category for: {desc}? (more options)",
-                        options=poll_options_2,
-                        is_anonymous=False,
-                        allows_multiple_answers=False,
-                        type=Poll.REGULAR,
-                    )
-                    new_poll_id = message.poll.id if message.poll else None
-                    if new_poll_id:
-                        pending.poll_id = new_poll_id
-                        pending.message_id = message.message_id
-                        pending.poll_options = poll_options_2
-                        self._pending_polls[new_poll_id] = pending
-                except Exception as exc:
-                    logger.error("Failed to send second poll: %s", exc)
+                    # poll.id was unexpectedly None — fall back to text
+                    logger.error("Second poll sent but poll.id is None")
                     pending.category_text_fallback = True
                     self._pending_text[pending.user_id] = pending
                     await context.bot.send_message(
                         chat_id=pending.chat_id,
                         text="Please type the category name:",
                     )
+            except Exception as exc:
+                logger.error("Failed to send second poll: %s", exc)
+                pending.category_text_fallback = True
+                self._pending_text[pending.user_id] = pending
+                await context.bot.send_message(
+                    chat_id=pending.chat_id,
+                    text="Please type the category name:",
+                )
             return
 
         # Normal selection
