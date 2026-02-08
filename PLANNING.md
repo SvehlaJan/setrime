@@ -4,27 +4,37 @@
 
 **Goal:** A Telegram bot that accepts expense inputs (banking app screenshots or free-form text), parses them using AI, and logs them into an existing Google Sheet for monthly spending analysis by category.
 
-**Key Constraints (from requirements gathering):**
+**Key Constraints (all confirmed):**
 - **Banks:** Czech, Slovak, and Polish banks + Revolut
 - **Languages in screenshots:** English, Czech, Slovak (mixed)
-- **Currencies:** CZK (primary), PLN, EUR - the sheet converts everything to CZK
-- **Categories:** Already defined in the Google Sheet (bot reads them dynamically)
+- **Text input language:** Slovak (primary), free-form
+- **Currencies:** CZK (primary), PLN, EUR - sheet auto-converts to CZK via formula
+- **Categories:** Data validation dropdown in the Google Sheet, **in Slovak language**
 - **Sheet structure:** `Date | Category | Description | Amount PLN | Amount CZK | Amount EUR | Total CZK`
+- **Sheet organization:** Monthly tabs (e.g., "January 2026", "February 2026")
+- **Total CZK column:** Formula (auto-calculated) - bot must never write to it
+- **Users:** Two users - you and your wife (both whitelisted by Telegram user ID)
+- **Operations:** Add expenses only (no edit/delete)
+- **Utility commands:** `/summary`, `/last`, `/undo`, `/categories` - all requested
+- **Bot interface:** English
+- **Error handling:** Full error messages sent to user + comprehensive server-side logging
 - **Hosting:** Self-hosted on a Proxmox mini-PC (no dedicated GPU)
 - **LLM:** Cloud API required (no GPU for local inference)
 
 **Core Flow:**
 ```
-User sends message (image or text)
-  (in English, Czech, or Slovak)
+User (you or wife) sends message (image or text)
+  Text input typically in Slovak
+  Screenshots in English, Czech, or Slovak
         |
         v
   Telegram Bot receives it
+  (checks user is whitelisted)
         |
         v
   AI/LLM parses expense data
   (date, category, description, amount, currency)
-  Categories are loaded from Google Sheet
+  Categories (Slovak) loaded from Google Sheet dropdown
         |
         v
   Missing info? ──Yes──> Ask follow-up question(s)
@@ -32,11 +42,15 @@ User sends message (image or text)
        No                       |
         |                  User replies
         v <─────────────────────┘
+  Find correct monthly tab (e.g. "February 2026")
   Write row to correct currency column
-  in Google Sheet (Amount PLN / CZK / EUR)
+  Leave Total CZK for the formula
         |
         v
   Confirm to user with summary
+  Log the operation
+        |
+  On error → send full error message to user + log
 ```
 
 ---
@@ -245,26 +259,43 @@ The Google Sheet already exists with this exact structure. The bot must write to
 | Column | Type | Bot Writes? | Notes |
 |--------|------|-------------|-------|
 | **Date** | Date | Yes | Parsed from input; default to today |
-| **Category** | String | Yes | Must match one of the categories already defined in the sheet |
+| **Category** | String | Yes | Must match one of the Slovak categories from the data validation dropdown |
 | **Description** | String | Yes | Merchant name, payee, or expense description |
 | **Amount PLN** | Number | Conditionally | Only filled if currency is PLN |
 | **Amount CZK** | Number | Conditionally | Only filled if currency is CZK |
 | **Amount EUR** | Number | Conditionally | Only filled if currency is EUR |
-| **Total CZK** | Number/Formula | **No** | Likely a formula that auto-converts PLN/EUR to CZK. Bot should leave this column untouched. |
+| **Total CZK** | Formula | **Never** | Auto-converts PLN/EUR to CZK. Bot must never touch this column. |
+
+**Sheet organization: Monthly tabs**
+- Each month has its own tab/worksheet (e.g., "January 2026", "February 2026")
+- The bot must determine the correct tab based on the expense date (not necessarily today's date - a user might log a past expense)
+- If the tab doesn't exist yet (e.g., logging the first expense of a new month), the bot should handle this gracefully (error message or create the tab)
 
 **Important implementation details:**
-- The bot must write the amount into exactly **one** of the three currency columns and leave the other two empty/blank.
-- The `Total CZK` column almost certainly has a conversion formula - the bot must **never overwrite it**. Instead, append rows and let the formula handle conversion.
-- Categories must be read dynamically from the sheet (a dedicated column, sheet, or data validation range) so the user can manage them in the spreadsheet without touching the bot.
+- The bot must write the amount into exactly **one** of the three currency columns and leave the other two empty/blank
+- The `Total CZK` column is a **confirmed formula** - the bot must **never overwrite it**. When appending rows, leave column G empty; the formula should auto-populate (or the user may need to drag it down)
+- **Formula handling caveat:** When appending a new row, the formula in `Total CZK` may not auto-extend. Options:
+  1. The user drags the formula down manually (simplest, but annoying)
+  2. The bot copies the formula from the previous row's `Total CZK` cell into the new row (recommended - use `gspread` to read the formula from the last row and replicate it)
+  3. Use an `ARRAYFORMULA` in the sheet header so it auto-extends (best UX, but requires a one-time sheet change)
+- Categories are in **Slovak** and come from a **data validation dropdown** - the bot reads the dropdown options via the Sheets API
 
-### 3.3 Category Management
+### 3.3 Category Management (Slovak, Data Validation Dropdown)
 
-Categories are already defined in the Google Sheet. The bot should:
+Categories are defined as a **data validation dropdown** in the Google Sheet, written in **Slovak**. Example categories might include: "Potraviny", "Stravovanie", "Doprava", "Bývanie", "Zábava", "Oblečenie", "Zdravie", etc.
 
-1. **On startup (and periodically):** Read the list of valid categories from the sheet (e.g., from a "Categories" sheet/tab, a named range, or a data validation dropdown column).
-2. **During parsing:** The LLM receives the category list in its prompt so it can match the expense to an existing category.
-3. **If uncertain:** Present an inline keyboard with the category list so the user can tap to select.
-4. **Cache the list** in memory and refresh it periodically or on a `/reload` command (avoids API calls on every expense).
+**Reading categories from data validation:**
+- The Google Sheets API can read data validation rules via `spreadsheets.get` with `includeGridData=true` or via the `dataValidation` field
+- `gspread` does not have a direct method for this, but you can use the underlying `spreadsheets.get` API call
+- Alternatively, if the data validation references a range (e.g., `Categories!A:A`), the bot can read that range directly (simpler)
+- **Implementation approach:** Try to read data validation rules first; if that's complex, read unique values from the Category column of existing rows as a fallback
+
+**Bot behavior:**
+1. **On startup:** Read the list of valid categories from the sheet (data validation range or unique existing values), cache them in memory
+2. **During parsing:** The LLM receives the full Slovak category list in its prompt so it can match "obed v reštaurácii" → "Stravovanie"
+3. **If LLM is uncertain:** Present an inline keyboard with all categories so the user can tap to select
+4. **Cache refresh:** On `/categories` command or periodically (every hour). The `/categories` command also serves as a way to display the current list
+5. **Language bridge:** The LLM must understand that user text input is in Slovak, categories are in Slovak, but the bot interface (confirmations, error messages) is in English
 
 ### 3.4 Multi-Language Screenshot Parsing
 
@@ -286,22 +317,24 @@ The LLM prompt must explicitly instruct the model to:
 The LLM should receive a structured system prompt like:
 
 ```
-You are an expense parser for a Czech user who uses Czech, Slovak, Polish
-banks and Revolut. Extract expense information from text messages or
-banking app screenshots.
+You are an expense parser. The user tracks expenses in a Google Sheet.
 
-The input may be in English, Czech, or Slovak language.
+INPUT:
+- Text messages are typically in SLOVAK language (sometimes Czech or English)
+- Images are banking app screenshots from Czech, Slovak, or Polish banks, or Revolut
+- Screenshots may be in English, Czech, or Slovak
 
-Extract these fields:
+EXTRACT these fields:
 - date: in YYYY-MM-DD format. Default to {today} if not specified.
 - amount: numeric value (use dot as decimal separator, no thousand separators)
 - currency: one of "CZK", "PLN", "EUR". Default to "CZK" if ambiguous.
   Recognize: Kč=CZK, zł=PLN, €=EUR.
-- category: one of these exact values: [{categories_from_sheet}]
-  Pick the best match. If unsure, set to null.
+- category: one of these EXACT Slovak values: [{categories_from_sheet}]
+  Match the expense to the best category. The categories are in Slovak.
+  If unsure, set to null.
 - description: merchant name, payee, or brief description of the expense
 
-Handle Czech/Slovak number formatting:
+Handle Czech/Slovak/Polish number formatting:
 - "1 234,50" means 1234.50
 - "1.234,50" means 1234.50
 
@@ -315,14 +348,23 @@ Return ONLY a JSON object:
 }
 
 For any field you cannot determine, set it to null.
+Do NOT include any text outside the JSON object.
 ```
 
+**Example interactions:**
+| User Input (Slovak text) | Parsed Output |
+|--------------------------|---------------|
+| "obed 185 Kč" | `{date: today, amount: 185, currency: "CZK", category: "Stravovanie", description: "obed"}` |
+| "Lidl nákup 1250" | `{date: today, amount: 1250, currency: "CZK", category: "Potraviny", description: "Lidl"}` |
+| "uber z letiska 45€" | `{date: today, amount: 45, currency: "EUR", category: "Doprava", description: "Uber z letiska"}` |
+| [screenshot from banking app] | `{date: "2026-02-05", amount: 890, currency: "CZK", category: "Oblečenie", description: "H&M"}` |
+
 **Follow-up question flow:**
-- If `category` is null → show inline keyboard with all categories
+- If `category` is null → show inline keyboard with all Slovak categories
 - If `amount` is null → ask "What was the amount?"
 - If `currency` is null → ask "What currency?" with CZK/PLN/EUR buttons
 - If `description` is null → ask "What was this expense for?"
-- If all fields present → confirm and write to sheet
+- If all fields present → show confirmation summary, then write to sheet
 
 ---
 
@@ -352,11 +394,69 @@ Building custom is the right call for this use case.
 
 ## 5. Security Considerations
 
-1. **Restrict bot access** - Only allow your Telegram user ID to interact with the bot (whitelist by `chat_id`)
-2. **Store credentials securely** - Service account JSON, API keys in environment variables or secrets manager, never in code
+1. **Restrict bot access** - Whitelist exactly two Telegram user IDs (you and your wife) via `ALLOWED_USER_IDS` env var. Reject all other users with a polite "unauthorized" message.
+2. **Store credentials securely** - Service account JSON, API keys, Telegram token in environment variables (Docker `.env` file), never in code
 3. **No financial data stored on server** - Parse and forward to Google Sheets, don't keep a local database of expenses
 4. **Image handling** - Process in memory, don't persist banking screenshots to disk
-5. **Google Sheet permissions** - Service account should only have access to the specific sheet
+5. **Google Sheet permissions** - Service account should only have access to the specific spreadsheet
+
+---
+
+## 5.1 Error Handling & Logging Strategy
+
+**Requirement:** Full error messages sent to the user in Telegram + comprehensive server-side logging.
+
+### Error Handling (User-Facing)
+
+Every error should result in a clear Telegram message to the user containing:
+- What operation failed (e.g., "Failed to parse expense", "Failed to write to Google Sheet")
+- The actual error message / exception details
+- A suggestion for what to try next
+
+Example error messages:
+```
+❌ Error: Failed to parse expense from image.
+Details: Gemini API returned 429 (rate limit exceeded)
+Suggestion: Please try again in a minute.
+
+❌ Error: Failed to write to Google Sheet.
+Details: Worksheet "February 2026" not found.
+Suggestion: Please create the tab in the spreadsheet, or send the expense again.
+
+❌ Error: Could not determine expense amount.
+Details: LLM returned null for amount field.
+Suggestion: Please specify the amount, e.g. "lunch 250 CZK"
+```
+
+### Logging (Server-Side)
+
+Use Python's `logging` module with structured output:
+
+| Level | What Gets Logged |
+|-------|-----------------|
+| **INFO** | Every successful expense added (user, date, amount, currency, category, description, sheet tab) |
+| **INFO** | Bot startup, shutdown, category cache refresh |
+| **WARNING** | Missing fields requiring follow-up, rate limit retries |
+| **ERROR** | API failures (Gemini, Google Sheets, Telegram), parsing failures, unexpected exceptions |
+| **DEBUG** | Raw LLM responses, full request/response details (for development) |
+
+**Log format:**
+```
+2026-02-08 14:23:45 [INFO] Expense added: user=@jansvehla date=2026-02-08 amount=450.00 currency=CZK category=Potraviny description="Albert" sheet="February 2026"
+2026-02-08 14:25:12 [ERROR] Gemini API error: 500 Internal Server Error. User=@wife. Input="obed 185kc". Traceback: ...
+```
+
+**Docker logging:**
+- Logs go to stdout/stderr (Docker captures them automatically)
+- Configure Docker log rotation in `docker-compose.yml` to prevent disk fill:
+  ```yaml
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+  ```
+- View logs via `docker compose logs -f expense-bot`
 
 ---
 
@@ -384,60 +484,72 @@ Building custom is the right call for this use case.
 
 | Phase | Description | Details | Effort |
 |-------|-------------|---------|--------|
-| **Phase 1** | **Setup & text parsing** | Bot skeleton, Gemini integration, parse text expenses, write to Google Sheet with correct currency column | 3-4 hours |
-| **Phase 2** | **Image parsing** | Handle photos, send to Gemini Vision, extract expense from Czech/Slovak/English banking screenshots | 2-3 hours |
-| **Phase 3** | **Category management** | Read categories from Google Sheet, cache, include in LLM prompt, inline keyboard fallback | 1-2 hours |
-| **Phase 4** | **Follow-up questions** | Conversation state for missing fields, inline keyboards for category/currency selection, confirm before writing | 2-3 hours |
-| **Phase 5** | **Docker deployment** | Dockerfile, docker-compose.yml, .env config, test on Proxmox LXC | 1-2 hours |
-| **Phase 6** | **Polish & extras** | Error handling, `/undo` command, `/summary` command, edge cases, testing with real screenshots | 2-3 hours |
+| **Phase 1** | **Bot skeleton + Google Sheets** | Bot setup with user whitelist (2 users), gspread connection, read categories from data validation dropdown, find correct monthly tab | 2-3 hours |
+| **Phase 2** | **Text expense parsing** | Gemini integration, Slovak text input → structured JSON, write to correct currency column in correct monthly tab | 2-3 hours |
+| **Phase 3** | **Image expense parsing** | Handle photos, send to Gemini Vision, extract expense from Czech/Slovak/English banking screenshots | 2-3 hours |
+| **Phase 4** | **Follow-up questions** | Conversation state for missing fields, inline keyboards for Slovak category selection & currency, confirm before writing | 2-3 hours |
+| **Phase 5** | **Utility commands** | `/summary` (monthly totals by category), `/last` (last N expenses), `/undo` (remove last), `/categories` (list + refresh cache) | 2-3 hours |
+| **Phase 6** | **Error handling & logging** | Full error messages to user, structured logging (INFO/WARNING/ERROR), graceful handling of API failures, missing tabs, rate limits | 1-2 hours |
+| **Phase 7** | **Docker deployment** | Dockerfile, docker-compose.yml with log rotation, .env config, health checks, README with setup instructions | 1-2 hours |
 
-**Total estimated effort: ~11-17 hours**
+**Total estimated effort: ~12-19 hours**
 
-### Phase 1 details (most critical):
-1. Create Telegram bot via @BotFather, get token
-2. Set up Google Cloud service account, share sheet
-3. Bot receives text → sends to Gemini → gets JSON → writes to correct column in sheet
-4. Example: user sends "Albert 450 Kč" → bot writes `Date=today, Category=Groceries, Description=Albert, Amount CZK=450`
+### Phase 1 details (foundation):
+1. Bot skeleton with `python-telegram-bot` v21+, long polling
+2. User whitelist middleware (rejects unauthorized users)
+3. Google Sheets connection via `gspread` + service account
+4. Read categories from data validation dropdown (Slovak) and cache in memory
+5. Locate correct monthly tab by name (e.g., "February 2026")
+
+### Phase 2 details (core feature):
+1. Receive Slovak text → send to Gemini with system prompt containing cached Slovak categories
+2. Parse JSON response → validate fields
+3. Write row: `Date | Category | Description | (amount in correct currency column) | (leave Total CZK empty for formula)`
+4. Handle the Total CZK formula (copy from previous row or rely on ARRAYFORMULA)
+5. Send confirmation message to user
+
+### Phase 5 details (utility commands):
+- `/summary` or `/summary February 2026` → read all rows from a monthly tab, aggregate by category, format as a table
+- `/last` or `/last 5` → show the last N expenses added (from current month tab)
+- `/undo` → remove the last row added to the current month tab (with confirmation)
+- `/categories` → list all categories from cache, refresh from sheet
+- `/help` → show all available commands
 
 ---
 
-## 8. Answered Questions & Remaining Open Questions
+## 8. All Requirements (Finalized)
 
-### Answered (Requirements Confirmed)
+All questions have been answered. Here is the complete requirements summary:
 
-| # | Question | Answer |
-|---|----------|--------|
+| # | Requirement | Decision |
+|---|-------------|----------|
 | 1 | Bank apps / languages | Czech, Slovak, Polish banks + Revolut. Screenshots in English, Czech, or Slovak. |
-| 2 | Expense categories | Already defined in the Google Sheet. Bot reads them dynamically. |
-| 3 | Currency | Primary: CZK. Also PLN and EUR. Sheet converts everything to CZK. |
-| 4 | Google Sheet structure | Existing: `Date | Category | Description | Amount PLN | Amount CZK | Amount EUR | Total CZK` |
-| 5 | Server specs | Proxmox mini-PC, no dedicated GPU. Multiple apps already hosted. |
-| 6 | Hosting preference | Self-hosted on the mini-PC. |
+| 2 | Text input language | **Slovak** (primary) |
+| 3 | Expense categories | Data validation dropdown in Google Sheet, **in Slovak language**. Bot reads them dynamically. |
+| 4 | Currency | Primary: CZK. Also PLN and EUR. Sheet auto-converts to CZK via formula. |
+| 5 | Google Sheet structure | `Date | Category | Description | Amount PLN | Amount CZK | Amount EUR | Total CZK` |
+| 6 | Total CZK column | **Formula** (auto-calculated). Bot never writes to it. |
+| 7 | Sheet organization | **Monthly tabs** (e.g., "January 2026", "February 2026") |
+| 8 | Users | **Two users**: you and your wife. Both whitelisted by Telegram user ID. |
+| 9 | Operations | **Add only**. No edit/delete via bot. |
+| 10 | Utility commands | **Yes, all**: `/summary`, `/last`, `/undo`, `/categories` |
+| 11 | Bot interface language | **English** |
+| 12 | Error handling | **Full error messages** sent to user in Telegram + comprehensive server-side logging |
+| 13 | Server specs | Proxmox mini-PC, no dedicated GPU. Multiple apps already hosted. |
+| 14 | Hosting preference | Self-hosted on the mini-PC, Docker in LXC container. |
 
-### Remaining Questions (Nice to Clarify Before Implementation)
+### Pre-Implementation Setup Checklist
 
-7. **Where in the Google Sheet are categories defined?** Options:
-   - A separate "Categories" tab/sheet?
-   - A column with data validation (dropdown)?
-   - A named range?
-   - The bot could also just read unique values from the "Category" column of existing rows.
+Before coding can begin, these manual steps are needed:
 
-8. **Total CZK column** - Is this a formula (auto-calculated) or manually entered? If it's a formula, the bot will leave it blank when appending rows and let the formula fill in. If manual, the bot would need exchange rates.
-
-9. **Monthly sheet tabs or single sheet?** Does each month have its own tab (e.g., "January 2026", "February 2026") or is everything in one continuous sheet? This affects where the bot appends rows.
-
-10. **Do you want the bot to be usable by just you, or also family members/partner?** (Affects user whitelist, potentially separate tracking.)
-
-11. **Edit/delete via bot?** Or just adding expenses? (Editing is much more complex to implement.)
-
-12. **Utility commands?** Would you like:
-    - `/summary` - monthly totals by category
-    - `/last` - show last N expenses added
-    - `/undo` - remove last added expense
-    - `/categories` - show current category list
-    - Or keep it minimal (just send expense, get confirmation)?
-
-13. **Bot interface language?** English? Czech? (The bot's replies and prompts, not the input parsing.)
+- [ ] **Create Telegram bot** via @BotFather → get bot token
+- [ ] **Get Telegram user IDs** for both you and your wife (e.g., message @userinfobot)
+- [ ] **Create Google Cloud project** (free) → enable Google Sheets API
+- [ ] **Create service account** → download credentials JSON
+- [ ] **Share Google Sheet** with the service account email (Editor permission)
+- [ ] **Get Gemini API key** from Google AI Studio (free)
+- [ ] **Note the Google Sheet ID** (from the URL: `docs.google.com/spreadsheets/d/{SHEET_ID}/...`)
+- [ ] **Confirm tab naming convention** (exact format: "January 2026"? "Jan 2026"? "01/2026"? "2026-01"?)
 
 ---
 
@@ -460,29 +572,70 @@ Based on the research and your confirmed requirements:
 ### Python Dependencies (Preliminary)
 
 ```
-python-telegram-bot[ext]>=21.0    # Telegram bot framework with extras
-google-generativeai>=0.8.0        # Gemini API client
+python-telegram-bot[ext]>=21.0    # Telegram bot framework with extras (includes httpx, etc.)
+google-generativeai>=0.8.0        # Gemini API client (google.generativeai)
 gspread>=6.0                      # Google Sheets API wrapper
 google-auth>=2.0                  # Service account authentication
 Pillow>=10.0                      # Image handling (resize before sending to LLM)
 python-dotenv>=1.0                # Environment variable management
 ```
 
-### Deployment Files Needed
+### Environment Variables
+
+```bash
+# .env file
+TELEGRAM_BOT_TOKEN=...                    # From @BotFather
+ALLOWED_USER_IDS=123456789,987654321      # Your and wife's Telegram user IDs
+GEMINI_API_KEY=...                        # From Google AI Studio
+GOOGLE_SHEETS_CREDENTIALS_FILE=...        # Path to service account JSON
+GOOGLE_SHEET_ID=...                       # Spreadsheet ID from URL
+DEFAULT_CURRENCY=CZK                      # Default currency if ambiguous
+LOG_LEVEL=INFO                            # DEBUG for development
+```
+
+### Project Structure
 
 ```
 expense-bot/
 ├── bot/
 │   ├── __init__.py
-│   ├── main.py              # Entry point, bot setup, polling
-│   ├── handlers.py          # Telegram message/command handlers
-│   ├── llm_parser.py        # LLM integration (Gemini/GPT)
-│   ├── sheets.py            # Google Sheets read/write
-│   ├── models.py            # Expense data model (dataclass)
-│   └── config.py            # Configuration from env vars
+│   ├── main.py              # Entry point, bot setup, long polling
+│   ├── config.py            # Configuration from env vars
+│   ├── handlers/
+│   │   ├── __init__.py
+│   │   ├── commands.py      # /start, /help, /summary, /last, /undo, /categories
+│   │   ├── expense.py       # Text + image expense handlers, conversation flow
+│   │   └── auth.py          # User whitelist middleware
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── llm_parser.py    # Gemini API integration, prompt building, JSON parsing
+│   │   ├── sheets.py        # Google Sheets: read categories, find tab, write row, read summary
+│   │   └── categories.py    # Category cache management
+│   └── models.py            # Expense dataclass, parsing result model
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-├── .env.example             # Template for secrets
-└── README.md
+├── .env.example             # Template for secrets (committed)
+├── .env                     # Actual secrets (gitignored)
+├── credentials.json         # Service account key (gitignored)
+└── README.md                # Setup + deployment instructions
+```
+
+### Docker Compose
+
+```yaml
+version: "3.8"
+services:
+  expense-bot:
+    build: .
+    container_name: expense-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
