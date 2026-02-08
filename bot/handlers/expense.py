@@ -141,24 +141,18 @@ class ExpenseHandler:
             return
 
         selected_index = poll_answer.option_ids[0]
-        categories = self._categories.categories
+        # Use the poll_options that were actually sent (may be a subset)
+        options = pending.poll_options or self._categories.categories
 
-        if selected_index < 0 or selected_index >= len(categories):
+        if selected_index < 0 or selected_index >= len(options):
             logger.error(
-                "Invalid poll option index %d (have %d categories)",
+                "Invalid poll option index %d (have %d options)",
                 selected_index,
-                len(categories),
+                len(options),
             )
             return
 
-        selected_category = categories[selected_index]
-        pending.parsed.category = selected_category
-
-        logger.info(
-            "User %s selected category '%s' via poll",
-            user_id,
-            selected_category,
-        )
+        selected_value = options[selected_index]
 
         # Try to close the poll
         if pending.message_id:
@@ -169,6 +163,54 @@ class ExpenseHandler:
                 )
             except Exception:
                 pass  # poll may already be closed or message deleted
+
+        # Handle "Iné (Other...)" — send a second poll with remaining categories
+        if selected_value == "Iné (Other...)":
+            logger.info("User %s selected 'Other', sending second poll", user_id)
+            all_cats = self._categories.categories
+            shown = set(options) - {"Iné (Other...)"}
+            remaining = [c for c in all_cats if c not in shown]
+            if remaining:
+                pending.poll_id = None
+                pending.message_id = None
+                pending.poll_options = None
+                # Send a second poll with remaining categories (up to 10)
+                if len(remaining) <= MAX_POLL_OPTIONS:
+                    poll_options_2 = remaining
+                else:
+                    poll_options_2 = remaining[: MAX_POLL_OPTIONS]
+                desc = pending.parsed.description or "expense"
+                try:
+                    message = await context.bot.send_poll(
+                        chat_id=pending.chat_id,
+                        question=f"Category for: {desc}? (more options)",
+                        options=poll_options_2,
+                        is_anonymous=False,
+                        allows_multiple_answers=False,
+                        type=Poll.REGULAR,
+                    )
+                    new_poll_id = message.poll.id if message.poll else None
+                    if new_poll_id:
+                        pending.poll_id = new_poll_id
+                        pending.message_id = message.message_id
+                        pending.poll_options = poll_options_2
+                        self._pending_polls[new_poll_id] = pending
+                except Exception as exc:
+                    logger.error("Failed to send second poll: %s", exc)
+                    self._pending_text[pending.user_id] = pending
+                    await context.bot.send_message(
+                        chat_id=pending.chat_id,
+                        text="Please type the category name:",
+                    )
+            return
+
+        # Normal selection
+        pending.parsed.category = selected_value
+        logger.info(
+            "User %s selected category '%s' via poll",
+            user_id,
+            selected_value,
+        )
 
         # Now try to finalize the expense
         await self._finalize_expense(pending, context)
@@ -306,7 +348,12 @@ class ExpenseHandler:
         context: ContextTypes.DEFAULT_TYPE,
         pending: PendingExpense,
     ) -> None:
-        """Send a Telegram poll for category selection."""
+        """Send a Telegram poll for category selection.
+
+        If there are more than 10 categories (Telegram poll limit),
+        use the LLM to pick the top candidates, plus an "Other..."
+        option that triggers a second poll with the remaining ones.
+        """
         categories = self._categories.categories
 
         if not categories:
@@ -319,17 +366,11 @@ class ExpenseHandler:
                 )
             return
 
-        if len(categories) > MAX_POLL_OPTIONS:
-            # Telegram polls max out at 10 options — truncate and note
-            poll_options = categories[:MAX_POLL_OPTIONS]
-            logger.warning(
-                "More than %d categories (%d), showing first %d in poll",
-                MAX_POLL_OPTIONS,
-                len(categories),
-                MAX_POLL_OPTIONS,
-            )
+        if len(categories) <= MAX_POLL_OPTIONS:
+            poll_options = list(categories)
         else:
-            poll_options = categories
+            # Ask LLM for top category guesses to narrow down the list
+            poll_options = await self._get_top_categories(pending, categories)
 
         # Build the question with expense context
         desc = pending.parsed.description or "expense"
@@ -357,6 +398,7 @@ class ExpenseHandler:
             if poll_id:
                 pending.poll_id = poll_id
                 pending.message_id = message.message_id
+                pending.poll_options = poll_options
                 self._pending_polls[poll_id] = pending
                 logger.info(
                     "Sent category poll %s for user %d with %d options",
@@ -375,6 +417,46 @@ class ExpenseHandler:
                     "Please type the category name:"
                 ),
             )
+
+    async def _get_top_categories(
+        self,
+        pending: PendingExpense,
+        all_categories: list[str],
+    ) -> list[str]:
+        """Ask the LLM to pick the most likely categories for a poll.
+
+        Returns up to (MAX_POLL_OPTIONS - 1) categories plus 'Iné (Other...)'
+        so the user can see a second poll with the rest if needed.
+        """
+        try:
+            desc = pending.parsed.description or ""
+            amount = pending.parsed.amount or 0
+            prompt = (
+                f"Given an expense: '{desc}' for {amount} {pending.parsed.currency}, "
+                f"which of these Slovak categories are the most likely? "
+                f"Return the top {MAX_POLL_OPTIONS - 1} most relevant category names "
+                f"as a JSON array of strings. Categories: {all_categories}"
+            )
+            response = await self._llm._client.aio.models.generate_content(
+                model=self._llm._model,
+                contents=prompt,
+            )
+            import json
+            raw = (response.text or "").strip()
+            if raw.startswith("```"):
+                lines = [l for l in raw.split("\n") if not l.strip().startswith("```")]
+                raw = "\n".join(lines).strip()
+            top: list[str] = json.loads(raw)
+            # Filter to only valid categories
+            valid_top = [c for c in top if c in all_categories]
+            if valid_top:
+                # Add "Iné (Other...)" as escape hatch to see remaining
+                return valid_top[: MAX_POLL_OPTIONS - 1] + ["Iné (Other...)"]
+        except Exception as exc:
+            logger.warning("LLM category ranking failed (%s), using first %d", exc, MAX_POLL_OPTIONS)
+
+        # Fallback: first 9 categories + "Iné (Other...)"
+        return all_categories[: MAX_POLL_OPTIONS - 1] + ["Iné (Other...)"]
 
     async def _finalize_expense(
         self,

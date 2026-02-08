@@ -7,13 +7,26 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, ValueRenderOption
 
-from bot.models import Expense
+from bot.models import (
+    COL_CATEGORY,
+    COL_DATE,
+    COL_DESCRIPTION,
+    COL_TOTAL_CZK,
+    TOTAL_CZK_COL,
+    Expense,
+)
 
 logger = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
+
+# Category column in gspread 1-indexed notation
+CATEGORY_COL_GSPREAD = 3  # Column C
+
+# Data validation: 0-indexed column index for C
+CATEGORY_COL_0IDX = 2
 
 
 class SheetsService:
@@ -31,9 +44,9 @@ class SheetsService:
 
     def read_categories(self) -> list[str]:
         """Read categories from the data validation dropdown on the Category
-        column (column B) of the first non-empty worksheet.
+        column (column C) of the first non-empty worksheet.
 
-        Falls back to reading unique values from column B if data validation
+        Falls back to reading unique values from column C if data validation
         rules cannot be parsed.
         """
         try:
@@ -56,14 +69,14 @@ class SheetsService:
                 f"&includeGridData=true",
             )
         )
-        # Navigate to the first sheet's data validation on column B (index 1)
+        # Navigate to column C (index 2) data validation
         sheets_data = response.get("sheets", [])
         for sheet in sheets_data:
             rows = sheet.get("data", [{}])[0].get("rowData", [])
             for row in rows:
                 values = row.get("values", [])
-                if len(values) > 1:
-                    dv = values[1].get("dataValidation")
+                if len(values) > CATEGORY_COL_0IDX:
+                    dv = values[CATEGORY_COL_0IDX].get("dataValidation")
                     if dv and dv.get("condition", {}).get("type") == "ONE_OF_LIST":
                         categories = [
                             v.get("userEnteredValue", "")
@@ -72,20 +85,20 @@ class SheetsService:
                         ]
                         if categories:
                             logger.info(
-                                "Read %d categories from data validation",
+                                "Read %d categories from data validation on column C",
                                 len(categories),
                             )
                             return categories
 
-        raise ValueError("No data validation dropdown found on column B")
+        raise ValueError("No data validation dropdown found on column C")
 
     def _read_categories_from_column(self) -> list[str]:
-        """Fallback: read unique non-empty values from the Category column
+        """Fallback: read unique non-empty values from the Category column (C)
         across all worksheets."""
         categories: set[str] = set()
         for ws in self._spreadsheet.worksheets():
             try:
-                col_values = ws.col_values(2)  # Column B = index 2 in gspread
+                col_values = ws.col_values(CATEGORY_COL_GSPREAD)
                 for val in col_values[1:]:  # skip header
                     stripped = str(val).strip()
                     if stripped:
@@ -95,12 +108,12 @@ class SheetsService:
 
         result = sorted(categories)
         logger.info(
-            "Read %d categories from column values (fallback)", len(result)
+            "Read %d categories from column C values (fallback)", len(result)
         )
         return result
 
     def get_worksheet(self, tab_name: str) -> gspread.Worksheet:
-        """Get a worksheet by tab name (e.g., '02/2026').
+        """Get a worksheet by tab name (e.g., 'Feb 2026').
 
         Raises gspread.exceptions.WorksheetNotFound if it doesn't exist.
         """
@@ -124,8 +137,8 @@ class SheetsService:
         all_values = ws.get_all_values()
         next_row = len(all_values) + 1
 
-        # Write the 6 data columns (A through F), leave G (Total CZK) untouched
-        cell_range = f"A{next_row}:F{next_row}"
+        # Write columns A through G (7 columns), leave H (Total CZK) untouched
+        cell_range = f"A{next_row}:G{next_row}"
         ws.update(
             values=[row_for_sheet],
             range_name=cell_range,
@@ -148,13 +161,14 @@ class SheetsService:
         return next_row
 
     def _copy_total_formula(self, ws: gspread.Worksheet, target_row: int) -> None:
-        """Copy the Total CZK formula from the previous row into the target row."""
+        """Copy the Total CZK formula from column H of the previous row."""
         if target_row < 3:
             # Row 2 is the first data row; no previous formula to copy
             return
         try:
+            prev_cell = f"{TOTAL_CZK_COL}{target_row - 1}"
             prev_formula = ws.acell(
-                f"G{target_row - 1}",
+                prev_cell,
                 value_render_option=ValueRenderOption.formula,
             ).value
             if prev_formula and isinstance(prev_formula, str) and prev_formula.startswith("="):
@@ -162,9 +176,10 @@ class SheetsService:
                 new_formula = self._adjust_formula_row(
                     prev_formula, target_row - 1, target_row
                 )
-                ws.update_acell(f"G{target_row}", new_formula)
+                target_cell = f"{TOTAL_CZK_COL}{target_row}"
+                ws.update_acell(target_cell, new_formula)
                 logger.debug(
-                    "Copied Total CZK formula to G%d: %s", target_row, new_formula
+                    "Copied Total CZK formula to %s: %s", target_cell, new_formula
                 )
         except Exception as exc:
             logger.warning("Could not copy Total CZK formula: %s", exc)
@@ -174,7 +189,7 @@ class SheetsService:
         """Naively adjust row numbers in a formula.
 
         Replaces occurrences of the old row number with the new one.
-        This handles simple formulas like =D5*rate+E5+F5*rate.
+        This handles simple formulas like =E5*rate+F5+G5*rate.
         """
         return formula.replace(str(old_row), str(new_row))
 
@@ -214,10 +229,10 @@ class SheetsService:
 
         summary: dict[str, float] = {}
         for row in all_values[1:]:
-            if len(row) < 7:
+            if len(row) <= COL_TOTAL_CZK:
                 continue
-            category = row[1].strip()
-            total_czk_str = row[6].strip()
+            category = row[COL_CATEGORY].strip()
+            total_czk_str = row[COL_TOTAL_CZK].strip()
             if not category or not total_czk_str:
                 continue
             try:

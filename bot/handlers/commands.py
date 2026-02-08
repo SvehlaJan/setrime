@@ -8,6 +8,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.handlers.auth import authorized
+from bot.models import COL_CATEGORY, COL_DATE, COL_DESCRIPTION, COL_TOTAL_CZK
 from bot.services.categories import CategoryCache
 from bot.services.sheets import SheetsService
 
@@ -100,7 +101,7 @@ class CommandHandler:
         if not self._check_auth(update):
             return
 
-        tab_name = self._get_tab_arg(context) or date.today().strftime("%m/%Y")
+        tab_name = self._get_tab_arg(context) or date.today().strftime("%b %Y")
 
         try:
             totals = self._sheets.get_summary(tab_name)
@@ -151,7 +152,7 @@ class CommandHandler:
             except ValueError:
                 pass
 
-        tab_name = date.today().strftime("%m/%Y")
+        tab_name = date.today().strftime("%b %Y")
 
         try:
             rows = self._sheets.get_last_rows(tab_name, count)
@@ -175,11 +176,11 @@ class CommandHandler:
 
         lines: list[str] = []
         for row in rows:
-            # Row: [Date, Category, Description, PLN, CZK, EUR, Total CZK]
-            row_date = row[0] if len(row) > 0 else "?"
-            category = row[1] if len(row) > 1 else "?"
-            desc = row[2] if len(row) > 2 else "?"
-            total = row[6] if len(row) > 6 else "?"
+            # Row: [A:Date, B:empty, C:Category, D:Desc, E:PLN, F:CZK, G:EUR, H:Total]
+            row_date = row[COL_DATE] if len(row) > COL_DATE else "?"
+            category = row[COL_CATEGORY] if len(row) > COL_CATEGORY else "?"
+            desc = row[COL_DESCRIPTION] if len(row) > COL_DESCRIPTION else "?"
+            total = row[COL_TOTAL_CZK] if len(row) > COL_TOTAL_CZK else "?"
             lines.append(f"  {row_date} | {category} | {desc} | {total} CZK")
 
         await self._reply(
@@ -195,7 +196,7 @@ class CommandHandler:
         if not self._check_auth(update):
             return
 
-        tab_name = date.today().strftime("%m/%Y")
+        tab_name = date.today().strftime("%b %Y")
 
         try:
             deleted = self._sheets.delete_last_row(tab_name)
@@ -217,10 +218,10 @@ class CommandHandler:
             await self._reply(update, f"No expenses to undo in `{tab_name}`.", parse_mode="Markdown")
             return
 
-        row_date = deleted[0] if len(deleted) > 0 else "?"
-        category = deleted[1] if len(deleted) > 1 else "?"
-        desc = deleted[2] if len(deleted) > 2 else "?"
-        total = deleted[6] if len(deleted) > 6 else "?"
+        row_date = deleted[COL_DATE] if len(deleted) > COL_DATE else "?"
+        category = deleted[COL_CATEGORY] if len(deleted) > COL_CATEGORY else "?"
+        desc = deleted[COL_DESCRIPTION] if len(deleted) > COL_DESCRIPTION else "?"
+        total = deleted[COL_TOTAL_CZK] if len(deleted) > COL_TOTAL_CZK else "?"
 
         await self._reply(
             update,
