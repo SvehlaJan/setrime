@@ -1,0 +1,30 @@
+# Secrets
+.env
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# mypy
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
