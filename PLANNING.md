@@ -756,6 +756,7 @@ Before coding can begin, these manual steps are needed:
 ```python
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
@@ -798,7 +799,7 @@ class PendingExpense:
     chat_id: int
     parsed: ParsedExpense
     poll_id: str | None = None
-    created_at: float = field(default_factory=lambda: 0.0)  # time.time()
+    created_at: float = field(default_factory=time.time)
 
 
 @dataclass
