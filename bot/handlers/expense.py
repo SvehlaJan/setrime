@@ -199,6 +199,7 @@ class ExpenseHandler:
                         self._pending_polls[new_poll_id] = pending
                 except Exception as exc:
                     logger.error("Failed to send second poll: %s", exc)
+                    pending.category_text_fallback = True
                     self._pending_text[pending.user_id] = pending
                     await context.bot.send_message(
                         chat_id=pending.chat_id,
@@ -301,7 +302,18 @@ class ExpenseHandler:
             return
 
         if parsed.category is None:
-            # Send a category poll
+            if pending.category_text_fallback:
+                # Poll already failed — ask via text instead of retrying
+                self._pending_text[pending.user_id] = pending
+                if update.effective_chat:
+                    cats = self._categories.categories
+                    hint = f"\nValid: {', '.join(cats)}" if cats else ""
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"Please type the category name:{hint}",
+                    )
+                return
+            # Try the poll first
             await self._send_category_poll(update, context, pending)
             return
 
@@ -340,6 +352,34 @@ class ExpenseHandler:
                 return
         elif parsed.description is None:
             parsed.description = text.strip()
+        elif parsed.category is None:
+            # User typed a category name (poll fallback)
+            entered = text.strip()
+            categories = self._categories.categories
+            # Try exact match first (case-insensitive)
+            match = next(
+                (c for c in categories if c.lower() == entered.lower()),
+                None,
+            )
+            if match:
+                parsed.category = match
+            elif categories:
+                # No match — re-prompt with the valid list
+                self._pending_text[user_id] = pending
+                cat_list = ", ".join(categories)
+                if update.effective_chat:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=(
+                            f"`{entered}` is not a valid category.\n"
+                            f"Please type one of: {cat_list}"
+                        ),
+                        parse_mode="Markdown",
+                    )
+                return
+            else:
+                # No categories loaded — accept whatever the user typed
+                parsed.category = entered
 
         # Check if more fields are still missing
         await self._check_and_ask(update, context, pending)
@@ -360,6 +400,7 @@ class ExpenseHandler:
 
         if not categories:
             # No categories available — ask as text
+            pending.category_text_fallback = True
             self._pending_text[pending.user_id] = pending
             if update.effective_chat:
                 await context.bot.send_message(
@@ -410,7 +451,8 @@ class ExpenseHandler:
                 )
         except Exception as exc:
             logger.error("Failed to send category poll: %s", exc)
-            # Fallback: ask as text
+            # Fallback: ask as text (set flag to avoid retrying poll)
+            pending.category_text_fallback = True
             self._pending_text[pending.user_id] = pending
             await context.bot.send_message(
                 chat_id=chat_id,

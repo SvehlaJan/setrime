@@ -95,6 +95,9 @@ class PendingExpense:
     message_id: int | None = None
     # Track which poll_options were used (subset of categories for >10 case)
     poll_options: list[str] | None = None
+    # When True, category selection falls back to text input instead of poll
+    # (set after a poll send failure to avoid retrying the poll in a loop)
+    category_text_fallback: bool = False
     created_at: float = field(default_factory=time.time)
 
     def is_expired(self, timeout_seconds: float = 3600.0) -> bool:
