@@ -5,6 +5,7 @@ from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.utils import ValueInputOption, ValueRenderOption
 
 from bot.models import Expense
 
@@ -21,7 +22,7 @@ class SheetsService:
 
     def __init__(self, credentials_file: str, sheet_id: str) -> None:
         self._sheet_id = sheet_id
-        creds = Credentials.from_service_account_file(
+        creds: Credentials = Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             credentials_file, scopes=SCOPES
         )
         self._client = gspread.authorize(creds)
@@ -86,7 +87,7 @@ class SheetsService:
             try:
                 col_values = ws.col_values(2)  # Column B = index 2 in gspread
                 for val in col_values[1:]:  # skip header
-                    stripped = val.strip()
+                    stripped = str(val).strip()
                     if stripped:
                         categories.add(stripped)
             except Exception:
@@ -125,7 +126,11 @@ class SheetsService:
 
         # Write the 6 data columns (A through F), leave G (Total CZK) untouched
         cell_range = f"A{next_row}:F{next_row}"
-        ws.update(cell_range, [row_for_sheet], value_input_option="USER_ENTERED")
+        ws.update(
+            values=[row_for_sheet],
+            range_name=cell_range,
+            value_input_option=ValueInputOption.user_entered,
+        )
 
         # Try to copy the Total CZK formula from the previous row
         self._copy_total_formula(ws, next_row)
@@ -149,7 +154,8 @@ class SheetsService:
             return
         try:
             prev_formula = ws.acell(
-                f"G{target_row - 1}", value_render_option="FORMULA"
+                f"G{target_row - 1}",
+                value_render_option=ValueRenderOption.formula,
             ).value
             if prev_formula and isinstance(prev_formula, str) and prev_formula.startswith("="):
                 # Adjust row references in the formula

@@ -95,9 +95,10 @@ class LLMParser:
             prompt += "\n\nExtract the expense from the following banking app screenshot."
 
         logger.debug("Sending image to LLM (size: %s)", image.size)
+        contents: list[str | Image.Image] = [prompt, image]
         response = await self._client.aio.models.generate_content(
             model=self._model,
-            contents=[prompt, image],
+            contents=contents,  # type: ignore[arg-type]
         )
         return self._parse_response(response)
 
