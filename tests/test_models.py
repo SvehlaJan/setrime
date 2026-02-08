@@ -51,7 +51,7 @@ class TestParsedExpense:
 
 class TestExpense:
     def test_tab_name_format(self) -> None:
-        """Tab name should be 'Feb 2026' style (abbreviated month + year)."""
+        """Tab name should be MM/YYYY format."""
         e = Expense(
             date=date(2026, 2, 1),
             amount=100,
@@ -59,13 +59,13 @@ class TestExpense:
             category="Test",
             description="Test",
         )
-        assert e.tab_name() == "Feb 2026"
+        assert e.tab_name() == "02/2026"
 
     def test_tab_name_various_months(self) -> None:
         for month, expected in [
-            (1, "Jan 2026"),
-            (3, "Mar 2026"),
-            (12, "Dec 2025"),
+            (1, "01/2026"),
+            (3, "03/2026"),
+            (12, "12/2025"),
         ]:
             year = 2026 if month != 12 else 2025
             e = Expense(
@@ -87,7 +87,7 @@ class TestExpense:
             description="X",
         )
         row = e.sheet_row()
-        assert row[0] == "1.2.2026"
+        assert row[1] == "1.2.2026"  # Column B = Date
 
     def test_date_format_double_digits(self) -> None:
         e = Expense(
@@ -98,7 +98,7 @@ class TestExpense:
             description="X",
         )
         row = e.sheet_row()
-        assert row[0] == "25.12.2026"
+        assert row[1] == "25.12.2026"  # Column B = Date
 
     def test_row_length_is_7(self) -> None:
         """Row should have 7 values (columns A through G)."""
@@ -112,8 +112,8 @@ class TestExpense:
         row = e.sheet_row()
         assert len(row) == 7
 
-    def test_column_b_is_empty(self) -> None:
-        """Column B (index 1) should always be None (empty spacer)."""
+    def test_column_a_is_empty(self) -> None:
+        """Column A (index 0) should always be None (empty — table starts at B)."""
         e = Expense(
             date=date(2026, 2, 1),
             amount=100,
@@ -122,7 +122,7 @@ class TestExpense:
             description="X",
         )
         row = e.sheet_row()
-        assert row[1] is None
+        assert row[0] is None
 
     def test_czk_in_correct_column(self) -> None:
         """CZK amount should be at index 5 (column F)."""
@@ -212,7 +212,8 @@ class TestExpense:
 
     def test_matches_screenshot_row_2(self) -> None:
         """Verify output matches row 2 from the screenshot:
-        1.2.2026 | Potraviny | Apalucha potraviny | | 658 | | 658
+        | 1.2.2026 | Potraviny | Apalucha potraviny | | 658 | | 658
+        (column A is empty, data starts at B)
         """
         e = Expense(
             date=date(2026, 2, 1),
@@ -223,18 +224,18 @@ class TestExpense:
         )
         row = e.sheet_row()
         assert row == [
-            "1.2.2026",       # A: Dátum
-            None,             # B: empty
+            None,             # A: empty (table starts at B)
+            "1.2.2026",       # B: Dátum
             "Potraviny",      # C: Kategória
             "Apalucha potraviny",  # D: Popis
             None,             # E: PLN
             658.0,            # F: CZK
             None,             # G: EUR
         ]
-        assert e.tab_name() == "Feb 2026"
+        assert e.tab_name() == "02/2026"
 
     def test_matches_screenshot_row_20_pln(self) -> None:
-        """Row 20: 2.2.2026 | Potraviny | Albert | 11.7 | | | 283.36815"""
+        """Row 20: | 2.2.2026 | Potraviny | Albert | 11.7 | | | 283.36815"""
         e = Expense(
             date=date(2026, 2, 2),
             amount=11.7,
@@ -244,7 +245,7 @@ class TestExpense:
         )
         row = e.sheet_row()
         assert row == [
-            "2.2.2026", None, "Potraviny", "Albert",
+            None, "2.2.2026", "Potraviny", "Albert",
             11.7, None, None,
         ]
 
@@ -256,10 +257,10 @@ class TestColumnConstants:
         assert CURRENCY_COLUMNS == {"PLN": 4, "CZK": 5, "EUR": 6}
 
     def test_col_indices(self) -> None:
-        assert COL_DATE == 0
-        assert COL_CATEGORY == 2
-        assert COL_DESCRIPTION == 3
-        assert COL_TOTAL_CZK == 7
+        assert COL_DATE == 1       # B
+        assert COL_CATEGORY == 2   # C
+        assert COL_DESCRIPTION == 3  # D
+        assert COL_TOTAL_CZK == 7  # H
 
     def test_total_czk_letter(self) -> None:
         assert TOTAL_CZK_COL == "H"

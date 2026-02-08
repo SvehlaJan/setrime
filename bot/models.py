@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 
 Currency = Literal["CZK", "PLN", "EUR"]
 
-# Actual sheet layout (0-indexed positions within the row we write):
-#   A: Dátum  |  B: (empty)  |  C: Kategória  |  D: Popis
-#   E: # PLN  |  F: # CZK   |  G: # EUR
+# Actual sheet layout (0-indexed positions within the row the bot writes):
+#   A: (empty)  |  B: Dátum    |  C: Kategória  |  D: Popis
+#   E: # PLN    |  F: # CZK   |  G: # EUR
 #   H: # Total CZK  (formula — never written by bot)
 #
 # The bot writes columns A through G (indices 0–6), leaving H for the formula.
@@ -21,10 +21,10 @@ CURRENCY_COLUMNS: dict[str, int] = {
 }
 
 # Column indices when reading full rows from gspread (0-indexed)
-COL_DATE = 0       # A
-COL_CATEGORY = 2   # C
+COL_DATE = 1        # B
+COL_CATEGORY = 2    # C
 COL_DESCRIPTION = 3  # D
-COL_TOTAL_CZK = 7  # H
+COL_TOTAL_CZK = 7   # H
 
 # Google Sheets column letter for the Total CZK formula
 TOTAL_CZK_COL = "H"
@@ -57,25 +57,21 @@ class Expense(BaseModel):
     description: str
 
     def tab_name(self) -> str:
-        """Return the monthly tab name.
-
-        Uses abbreviated English month name + year, matching the actual
-        Google Sheet (e.g., 'Feb 2026', 'Mar 2026').
-        """
-        return self.date.strftime("%b %Y")
+        """Return the monthly tab name in MM/YYYY format (e.g., '02/2026')."""
+        return self.date.strftime("%m/%Y")
 
     def sheet_row(self) -> list[str | float | None]:
         """Return a row list matching the sheet columns A through G:
 
-        A: Dátum | B: (empty) | C: Kategória | D: Popis |
-        E: # PLN | F: # CZK  | G: # EUR
+        A: (empty) | B: Dátum | C: Kategória | D: Popis |
+        E: # PLN   | F: # CZK | G: # EUR
 
         Column H (Total CZK) is a formula and is NOT included.
         """
         row: list[str | float | None] = [
+            None,  # Column A — empty (table starts at B)
             # Date without leading zeros: "1.2.2026"
             f"{self.date.day}.{self.date.month}.{self.date.year}",
-            None,  # Column B — empty spacer
             self.category,
             self.description,
             None,  # E: Amount PLN

@@ -101,7 +101,7 @@ class CommandHandler:
         if not self._check_auth(update):
             return
 
-        tab_name = self._get_tab_arg(context) or date.today().strftime("%b %Y")
+        tab_name = self._get_tab_arg(context) or date.today().strftime("%m/%Y")
 
         try:
             totals = self._sheets.get_summary(tab_name)
@@ -152,7 +152,7 @@ class CommandHandler:
             except ValueError:
                 pass
 
-        tab_name = date.today().strftime("%b %Y")
+        tab_name = date.today().strftime("%m/%Y")
 
         try:
             rows = self._sheets.get_last_rows(tab_name, count)
@@ -196,7 +196,7 @@ class CommandHandler:
         if not self._check_auth(update):
             return
 
-        tab_name = date.today().strftime("%b %Y")
+        tab_name = date.today().strftime("%m/%Y")
 
         try:
             deleted = self._sheets.delete_last_row(tab_name)
